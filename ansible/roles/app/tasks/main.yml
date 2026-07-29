@@ -1,0 +1,60 @@
+---
+# app role: pull Docker image from GHCR and run as a container
+
+- name: Log in to GitHub Container Registry
+  ansible.builtin.command: >
+    docker login ghcr.io
+    -u {{ github_actor }}
+    --password-stdin
+  args:
+    stdin: "{{ github_token }}"
+  no_log: true
+  changed_when: true
+
+- name: Pull application image
+  ansible.builtin.command: >
+    docker pull ghcr.io/{{ github_actor }}/springboot-api:{{ image_tag }}
+  changed_when: true
+
+- name: Write application .env file
+  ansible.builtin.copy:
+    dest: "{{ app_dir }}/.env"
+    content: |
+      SPRING_PROFILES_ACTIVE=production
+      SERVER_PORT={{ app_port }}
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0600"
+  no_log: true
+
+- name: Stop and remove existing container (if any)
+  ansible.builtin.command: docker rm -f {{ container_name }}
+  ignore_errors: true
+  changed_when: true
+
+- name: Run application container
+  ansible.builtin.command: >
+    docker run -d
+    --name {{ container_name }}
+    --restart unless-stopped
+    --env-file {{ app_dir }}/.env
+    -p {{ app_port }}:{{ app_port }}
+    --health-cmd "curl -f http://localhost:{{ app_port }}/actuator/health || exit 1"
+    --health-interval 30s
+    --health-timeout 10s
+    --health-retries 3
+    --health-start-period 60s
+    ghcr.io/{{ github_actor }}/springboot-api:{{ image_tag }}
+  changed_when: true
+
+- name: Wait for container to be healthy
+  ansible.builtin.shell: |
+    for i in $(seq 1 20); do
+      STATUS=$(docker inspect --format="{{ '{{' }}.State.Health.Status{{ '}}' }}" {{ container_name }} 2>/dev/null || echo "missing")
+      if [ "$STATUS" = "healthy" ]; then
+        exit 0
+      fi
+      sleep 10
+    done
+    exit 1
+  changed_when: false

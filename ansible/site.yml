@@ -1,0 +1,50 @@
+---
+# springboot-api — main Ansible playbook
+# Idempotent: safe to re-run on any state.
+- name: Configure springboot-api EC2 instance
+  hosts: app
+  become: true
+  gather_facts: true
+
+  vars:
+    app_user: apprunner
+    app_dir: /opt/springboot-api
+    container_name: springboot-api
+    app_port: 8080
+    nginx_port: 80
+
+  pre_tasks:
+    - name: Wait for SSH to be available
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: 120
+
+    - name: Wait for apt lock to release
+      ansible.builtin.shell: |
+        while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+          sleep 5
+        done
+      changed_when: false
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+  roles:
+    - common
+    - app
+    - nginx_proxy
+
+  post_tasks:
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for application to be healthy
+      ansible.builtin.uri:
+        url: "http://localhost:{{ app_port }}/actuator/health"
+        status_code: 200
+      register: health
+      retries: 15
+      delay: 10
+      until: health.status == 200

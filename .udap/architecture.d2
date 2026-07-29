@@ -1,0 +1,24 @@
+# udap:meta cloud=aws region=us-east-1 target=ec2
+
+vpc: AWS VPC (us-east-1) {
+  internet_gw: Internet Gateway { shape: rectangle; udap-type: aws.ec2 }
+  ec2: EC2 Instance (t3.small) { shape: rectangle; udap-type: aws.ec2 }
+  eip: Elastic IP { shape: rectangle; udap-type: aws.ec2 }
+  sg: Security Group (80/443/22) { shape: rectangle; udap-type: aws.ec2 }
+}
+github_actions: GitHub Actions CI/CD { shape: rectangle; udap-type: generic.app }
+cicd_template: springboot-cicd-template Repo { shape: rectangle; udap-type: generic.app }
+app_repo: springboot-api Repo { shape: rectangle; udap-type: generic.app }
+user: Developer { shape: rectangle; udap-type: generic.user }
+ghcr: GitHub Container Registry { shape: rectangle; udap-type: generic.app }
+
+user -> app_repo: git push
+app_repo -> github_actions: triggers workflow
+github_actions -> cicd_template: calls reusable workflow
+cicd_template -> ghcr: docker push (SHA tag)
+cicd_template -> vpc.ec2: terraform provision + ansible configure
+github_actions -> vpc.eip: verify /actuator/health
+vpc.internet_gw -> vpc.ec2: routes traffic
+vpc.eip -> vpc.ec2: static IP binding
+vpc.sg -> vpc.ec2: ingress 80/443/22
+vpc.ec2 -> ghcr: docker pull image

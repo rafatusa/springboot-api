@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>springboot-api | Enterprise REST API</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+    }
+    .badge {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 9999px;
+      padding: 6px 16px;
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 32px;
+    }
+    h1 {
+      font-size: clamp(2rem, 5vw, 3.5rem);
+      font-weight: 800;
+      background: linear-gradient(135deg, #6366f1, #06b6d4);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      text-align: center;
+      margin-bottom: 16px;
+    }
+    .subtitle {
+      color: #94a3b8;
+      font-size: 1.1rem;
+      text-align: center;
+      max-width: 600px;
+      margin-bottom: 48px;
+      line-height: 1.7;
+    }
+    .status-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 24px 32px;
+      margin-bottom: 48px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .status-dot {
+      width: 10px; height: 10px;
+      background: #22c55e;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .endpoints {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 16px;
+      max-width: 900px;
+      width: 100%;
+      margin-bottom: 48px;
+    }
+    .endpoint {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: inherit;
+      transition: border-color 0.2s, transform 0.2s;
+      cursor: pointer;
+    }
+    .endpoint:hover { border-color: #6366f1; transform: translateY(-2px); }
+    .method {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-family: monospace;
+      min-width: 48px;
+      text-align: center;
+    }
+    .get  { background: #064e3b; color: #34d399; }
+    .post { background: #1e3a5f; color: #60a5fa; }
+    .put  { background: #451a03; color: #fb923c; }
+    .del  { background: #450a0a; color: #f87171; }
+    .path { font-family: monospace; font-size: 13px; color: #cbd5e1; }
+    .section-title {
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #64748b;
+      margin-bottom: 16px;
+      text-align: center;
+    }
+    footer {
+      color: #475569;
+      font-size: 13px;
+      text-align: center;
+      margin-top: auto;
+      padding-top: 32px;
+    }
+    footer a { color: #6366f1; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="badge">🚀 Deployed via UDAP · AWS EC2</div>
+  <h1>springboot-api</h1>
+  <p class="subtitle">
+    Enterprise Spring Boot 3.2 REST API — Java 17, Docker, Terraform, Ansible,
+    12-stage CI/CD pipeline with OWASP security scanning and k6 performance tests.
+  </p>
+
+  <div class="status-card">
+    <div class="status-dot"></div>
+    <span style="color:#22c55e;font-weight:600;">API is running</span>
+    <span style="color:#64748b;font-size:14px;">· Health check passing</span>
+  </div>
+
+  <p class="section-title">API Endpoints</p>
+  <div class="endpoints">
+    <a class="endpoint" href="/actuator/health" target="_blank">
+      <span class="method get">GET</span>
+      <span class="path">/actuator/health</span>
+    </a>
+    <a class="endpoint" href="/actuator/info" target="_blank">
+      <span class="method get">GET</span>
+      <span class="path">/actuator/info</span>
+    </a>
+    <a class="endpoint" href="/api/v1/info" target="_blank">
+      <span class="method get">GET</span>
+      <span class="path">/api/v1/info</span>
+    </a>
+    <a class="endpoint" href="/api/v1/items" target="_blank">
+      <span class="method get">GET</span>
+      <span class="path">/api/v1/items</span>
+    </a>
+    <div class="endpoint">
+      <span class="method get">GET</span>
+      <span class="path">/api/v1/items/{id}</span>
+    </div>
+    <div class="endpoint">
+      <span class="method post">POST</span>
+      <span class="path">/api/v1/items</span>
+    </div>
+    <div class="endpoint">
+      <span class="method put">PUT</span>
+      <span class="path">/api/v1/items/{id}</span>
+    </div>
+    <div class="endpoint">
+      <span class="method del">DELETE</span>
+      <span class="path">/api/v1/items/{id}</span>
+    </div>
+  </div>
+
+  <footer>
+    Built with Spring Boot 3.2 · Deployed on AWS EC2 ·
+    <a href="https://github.com" target="_blank">View on GitHub</a>
+  </footer>
+</body>
+</html>
