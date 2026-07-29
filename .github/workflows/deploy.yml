@@ -19,22 +19,23 @@ jobs:
     - name: Bootstrap and sync springboot-cicd-template repo
       run: "set -euo pipefail\nTEMPLATE_REPO=\"${REPO_OWNER}/springboot-cicd-template\"\
         \necho \"=== Bootstrap: $TEMPLATE_REPO ===\"\n\n# Create repo if it does not\
-        \ exist\nif ! gh api \"/repos/${TEMPLATE_REPO}\" --silent 2>/dev/null; then\n\
-        \  echo \"Creating $TEMPLATE_REPO ...\"\n  gh api --method POST /user/repos\
+        \ exist (gh api exits 0 on 200, non-zero on 404)\nif gh api \"/repos/${TEMPLATE_REPO}\"\
+        \ --silent 2>/dev/null; then\n  echo \"Repo $TEMPLATE_REPO already exists.\"\
+        \nelse\n  echo \"Creating $TEMPLATE_REPO ...\"\n  gh api --method POST /user/repos\
         \ \\\n    -f name=springboot-cicd-template \\\n    -f description=\"Enterprise\
         \ reusable CI/CD pipeline for Spring Boot apps\" \\\n    -F private=false\
-        \ \\\n    -F auto_init=true\n  echo \"Waiting 15s for GitHub to initialise\
-        \ repo...\"\n  sleep 15\nelse\n  echo \"Repo $TEMPLATE_REPO already exists.\"\
-        \nfi\n\n# Clone the template repo and sync cicd-template/ into it\nTMPDIR=$(mktemp\
-        \ -d)\ngit clone \"https://${GH_TOKEN}@github.com/${TEMPLATE_REPO}.git\" \"\
-        $TMPDIR\"\nmkdir -p \"$TMPDIR/.github/workflows\"\n\ncp cicd-template/.github/workflows/enterprise-pipeline.yml\
-        \ \\\n   \"$TMPDIR/.github/workflows/enterprise-pipeline.yml\"\ncp cicd-template/README.md\
-        \ \"$TMPDIR/README.md\"\n\ncd \"$TMPDIR\"\ngit config user.email \"cicd-bootstrap@springboot-api\"\
+        \ \\\n    -F auto_init=true\n  echo \"Waiting 20s for GitHub to initialise\
+        \ repo...\"\n  sleep 20\nfi\n\n# Clone the template repo and sync cicd-template/\
+        \ into it\nCLONEDIR=$(mktemp -d)\ngit clone \"https://x-access-token:${GH_TOKEN}@github.com/${TEMPLATE_REPO}.git\"\
+        \ \"$CLONEDIR\"\nmkdir -p \"$CLONEDIR/.github/workflows\"\n\ncp cicd-template/.github/workflows/enterprise-pipeline.yml\
+        \ \\\n   \"$CLONEDIR/.github/workflows/enterprise-pipeline.yml\"\ncp cicd-template/README.md\
+        \ \"$CLONEDIR/README.md\"\n\ncd \"$CLONEDIR\"\ngit config user.email \"cicd-bootstrap@springboot-api\"\
         \ngit config user.name \"springboot-api CI\"\ngit add -A\n\nif git diff --cached\
         \ --quiet; then\n  echo \"Template repo already up to date \u2014 no commit\
         \ needed.\"\nelse\n  git commit -m \"chore: sync enterprise pipeline from\
         \ springboot-api@${{ github.sha }}\"\n  git push origin main\n  echo \"Template\
-        \ repo updated.\"\nfi\n"
+        \ repo updated and pushed.\"\nfi\necho \"Bootstrap complete. Template repo:\
+        \ https://github.com/${TEMPLATE_REPO}\"\n"
       env:
         GH_TOKEN: ${{ secrets.CICD_TEMPLATE_TOKEN }}
         REPO_OWNER: ${{ github.repository_owner }}
@@ -42,31 +43,29 @@ jobs:
       name: Dispatch enterprise pipeline to springboot-cicd-template
       run: "set -euo pipefail\necho \"=== Two-Repo Enterprise CI/CD Pattern ===\"\n\
         echo \"App repo  : $APP_REPO\"\necho \"Template  : ${REPO_OWNER}/springboot-cicd-template\"\
-        \necho \"Commit SHA: $COMMIT_SHA\"\n\n# Brief pause to ensure workflow file\
-        \ is indexed by GitHub after sync\nsleep 10\n\nHTTP_STATUS=$(gh api \\\n \
-        \ --method POST \\\n  -H \"Accept: application/vnd.github+json\" \\\n  \"\
-        /repos/${REPO_OWNER}/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/dispatches\"\
+        \necho \"Commit SHA: $COMMIT_SHA\"\n\n# Wait for GitHub to index the workflow\
+        \ file after the sync push\necho \"Waiting 15s for GitHub Actions to index\
+        \ the workflow file...\"\nsleep 15\n\n# gh api exits 0 on HTTP 204 (workflow_dispatch\
+        \ success), non-zero on error.\n# Do NOT use -w or --silent with -o \u2014\
+        \ just let gh report errors naturally.\ngh api \\\n  --method POST \\\n  -H\
+        \ \"Accept: application/vnd.github+json\" \\\n  \"/repos/${REPO_OWNER}/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/dispatches\"\
         \ \\\n  -f ref=main \\\n  -f \"inputs[app_repo]=${APP_REPO}\" \\\n  -f \"\
         inputs[app_ref]=${COMMIT_SHA}\" \\\n  -f \"inputs[java_version]=17\" \\\n\
         \  -f \"inputs[image_name]=${REPO_OWNER}/springboot-api\" \\\n  -f \"inputs[aws_region]=us-east-1\"\
         \ \\\n  -f \"inputs[instance_type]=t3.small\" \\\n  -f \"inputs[health_endpoint]=/actuator/health\"\
         \ \\\n  -f \"inputs[run_perf_tests]=true\" \\\n  -f \"inputs[owasp_cvss_threshold]=9\"\
-        \ \\\n  --silent -o /dev/null -w \"%{http_code}\" 2>/dev/null || echo \"000\"\
-        )\n\necho \"Dispatch HTTP status: $HTTP_STATUS\"\nif [ \"$HTTP_STATUS\" =\
-        \ \"204\" ]; then\n  echo \"Enterprise pipeline dispatched successfully.\"\
-        \nelse\n  echo \"::error::Dispatch failed (HTTP $HTTP_STATUS). Check CICD_TEMPLATE_TOKEN\
-        \ has actions:write on springboot-cicd-template.\"\n  exit 1\nfi\n\necho \"\
-        dispatch_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$GITHUB_OUTPUT\"\n"
+        \n\necho \"Enterprise pipeline dispatched successfully.\"\necho \"dispatch_time=$(date\
+        \ -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$GITHUB_OUTPUT\"\n"
       env:
         GH_TOKEN: ${{ secrets.CICD_TEMPLATE_TOKEN }}
         APP_REPO: ${{ github.repository }}
         COMMIT_SHA: ${{ github.sha }}
         REPO_OWNER: ${{ github.repository_owner }}
     - name: Poll enterprise pipeline to completion
-      run: "set -euo pipefail\necho \"Waiting 45s for dispatched run to appear in\
-        \ GitHub...\"\nsleep 45\n\nMAX_WAIT=5400\nWAITED=0\nINTERVAL=30\n\nwhile [\
-        \ \"$WAITED\" -lt \"$MAX_WAIT\" ]; do\n  RUN_JSON=$(gh api \\\n    -H \"Accept:\
-        \ application/vnd.github+json\" \\\n    \"/repos/${REPO_OWNER}/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/runs?per_page=1\"\
+      run: "set -euo pipefail\necho \"Waiting 60s for dispatched run to appear in\
+        \ GitHub Actions...\"\nsleep 60\n\nMAX_WAIT=5400\nWAITED=0\nINTERVAL=30\n\n\
+        while [ \"$WAITED\" -lt \"$MAX_WAIT\" ]; do\n  RUN_JSON=$(gh api \\\n    -H\
+        \ \"Accept: application/vnd.github+json\" \\\n    \"/repos/${REPO_OWNER}/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/runs?per_page=1\"\
         \ \\\n    2>/dev/null || echo '{\"workflow_runs\":[]}')\n\n  STATUS=$(echo\
         \ \"$RUN_JSON\" | python3 -c \\\n    \"import sys,json; r=json.load(sys.stdin)['workflow_runs'];\
         \ print(r[0]['status'] if r else 'none')\" 2>/dev/null || echo \"none\")\n\

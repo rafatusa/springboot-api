@@ -14,7 +14,7 @@ rollback:
 # The provision stage:
 #   1. Creates springboot-cicd-template repo if it doesn't exist
 #   2. Syncs cicd-template/ into it (so the template repo is always current)
-#   3. Dispatches the full 12-stage enterprise pipeline via GitHub API
+#   3. Dispatches the full 12-stage enterprise pipeline via GitHub REST API
 #   4. Polls until completion
 # =============================================================================
 
@@ -44,30 +44,30 @@ stages:
           TEMPLATE_REPO="${REPO_OWNER}/springboot-cicd-template"
           echo "=== Bootstrap: $TEMPLATE_REPO ==="
 
-          # Create repo if it does not exist
-          if ! gh api "/repos/${TEMPLATE_REPO}" --silent 2>/dev/null; then
+          # Create repo if it does not exist (gh api exits 0 on 200, non-zero on 404)
+          if gh api "/repos/${TEMPLATE_REPO}" --silent 2>/dev/null; then
+            echo "Repo $TEMPLATE_REPO already exists."
+          else
             echo "Creating $TEMPLATE_REPO ..."
             gh api --method POST /user/repos \
               -f name=springboot-cicd-template \
               -f description="Enterprise reusable CI/CD pipeline for Spring Boot apps" \
               -F private=false \
               -F auto_init=true
-            echo "Waiting 15s for GitHub to initialise repo..."
-            sleep 15
-          else
-            echo "Repo $TEMPLATE_REPO already exists."
+            echo "Waiting 20s for GitHub to initialise repo..."
+            sleep 20
           fi
 
           # Clone the template repo and sync cicd-template/ into it
-          TMPDIR=$(mktemp -d)
-          git clone "https://${GH_TOKEN}@github.com/${TEMPLATE_REPO}.git" "$TMPDIR"
-          mkdir -p "$TMPDIR/.github/workflows"
+          CLONEDIR=$(mktemp -d)
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${TEMPLATE_REPO}.git" "$CLONEDIR"
+          mkdir -p "$CLONEDIR/.github/workflows"
 
           cp cicd-template/.github/workflows/enterprise-pipeline.yml \
-             "$TMPDIR/.github/workflows/enterprise-pipeline.yml"
-          cp cicd-template/README.md "$TMPDIR/README.md"
+             "$CLONEDIR/.github/workflows/enterprise-pipeline.yml"
+          cp cicd-template/README.md "$CLONEDIR/README.md"
 
-          cd "$TMPDIR"
+          cd "$CLONEDIR"
           git config user.email "cicd-bootstrap@springboot-api"
           git config user.name "springboot-api CI"
           git add -A
@@ -77,8 +77,9 @@ stages:
           else
             git commit -m "chore: sync enterprise pipeline from springboot-api@${{ github.sha }}"
             git push origin main
-            echo "Template repo updated."
+            echo "Template repo updated and pushed."
           fi
+          echo "Bootstrap complete. Template repo: https://github.com/${TEMPLATE_REPO}"
 
       - name: Dispatch enterprise pipeline to springboot-cicd-template
         id: dispatch
@@ -94,10 +95,13 @@ stages:
           echo "Template  : ${REPO_OWNER}/springboot-cicd-template"
           echo "Commit SHA: $COMMIT_SHA"
 
-          # Brief pause to ensure workflow file is indexed by GitHub after sync
-          sleep 10
+          # Wait for GitHub to index the workflow file after the sync push
+          echo "Waiting 15s for GitHub Actions to index the workflow file..."
+          sleep 15
 
-          HTTP_STATUS=$(gh api \
+          # gh api exits 0 on HTTP 204 (workflow_dispatch success), non-zero on error.
+          # Do NOT use -w or --silent with -o — just let gh report errors naturally.
+          gh api \
             --method POST \
             -H "Accept: application/vnd.github+json" \
             "/repos/${REPO_OWNER}/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/dispatches" \
@@ -110,17 +114,9 @@ stages:
             -f "inputs[instance_type]=t3.small" \
             -f "inputs[health_endpoint]=/actuator/health" \
             -f "inputs[run_perf_tests]=true" \
-            -f "inputs[owasp_cvss_threshold]=9" \
-            --silent -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+            -f "inputs[owasp_cvss_threshold]=9"
 
-          echo "Dispatch HTTP status: $HTTP_STATUS"
-          if [ "$HTTP_STATUS" = "204" ]; then
-            echo "Enterprise pipeline dispatched successfully."
-          else
-            echo "::error::Dispatch failed (HTTP $HTTP_STATUS). Check CICD_TEMPLATE_TOKEN has actions:write on springboot-cicd-template."
-            exit 1
-          fi
-
+          echo "Enterprise pipeline dispatched successfully."
           echo "dispatch_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Poll enterprise pipeline to completion
@@ -129,8 +125,8 @@ stages:
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          echo "Waiting 45s for dispatched run to appear in GitHub..."
-          sleep 45
+          echo "Waiting 60s for dispatched run to appear in GitHub Actions..."
+          sleep 60
 
           MAX_WAIT=5400
           WAITED=0
