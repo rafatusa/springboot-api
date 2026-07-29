@@ -13,97 +13,80 @@ jobs:
       TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
       TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
       TF_VAR_region: us-east-1
-    timeout-minutes: 120
+    timeout-minutes: 30
     steps:
     - uses: actions/checkout@v4
-    - name: Bootstrap and sync springboot-cicd-template repo
-      run: "set -euo pipefail\nTEMPLATE_REPO=\"${REPO_OWNER}/springboot-cicd-template\"\
-        \necho \"=== Bootstrap: $TEMPLATE_REPO ===\"\n\n# Create repo if it does not\
-        \ exist (gh api exits 0 on 200, non-zero on 404)\nif gh api \"/repos/${TEMPLATE_REPO}\"\
-        \ --silent 2>/dev/null; then\n  echo \"Repo $TEMPLATE_REPO already exists.\"\
-        \nelse\n  echo \"Creating $TEMPLATE_REPO ...\"\n  gh api --method POST /user/repos\
-        \ \\\n    -f name=springboot-cicd-template \\\n    -f description=\"Enterprise\
-        \ reusable CI/CD pipeline for Spring Boot apps\" \\\n    -F private=false\
-        \ \\\n    -F auto_init=true\n  echo \"Waiting 20s for GitHub to initialise\
-        \ repo...\"\n  sleep 20\nfi\n\n# Clone the template repo and sync cicd-template/\
-        \ into it\nCLONEDIR=$(mktemp -d)\ngit clone \"https://x-access-token:${GH_TOKEN}@github.com/${TEMPLATE_REPO}.git\"\
-        \ \"$CLONEDIR\"\nmkdir -p \"$CLONEDIR/.github/workflows\"\n\ncp cicd-template/.github/workflows/enterprise-pipeline.yml\
-        \ \\\n   \"$CLONEDIR/.github/workflows/enterprise-pipeline.yml\"\ncp cicd-template/README.md\
-        \ \"$CLONEDIR/README.md\"\n\ncd \"$CLONEDIR\"\ngit config user.email \"cicd-bootstrap@springboot-api\"\
-        \ngit config user.name \"springboot-api CI\"\ngit add -A\n\nif git diff --cached\
-        \ --quiet; then\n  echo \"Template repo already up to date \u2014 no commit\
-        \ needed.\"\nelse\n  git commit -m \"chore: sync enterprise pipeline from\
-        \ springboot-api@${{ github.sha }}\"\n  git push origin main\n  echo \"Template\
-        \ repo updated and pushed.\"\nfi\necho \"Bootstrap complete. Template repo:\
-        \ https://github.com/${TEMPLATE_REPO}\"\n"
-      env:
-        GH_TOKEN: ${{ secrets.CICD_TEMPLATE_TOKEN }}
-        REPO_OWNER: ${{ github.repository_owner }}
-    - id: dispatch
-      name: Dispatch enterprise pipeline to springboot-cicd-template
-      run: "set -euo pipefail\necho \"=== Two-Repo Enterprise CI/CD Pattern ===\"\n\
-        echo \"App repo  : $APP_REPO\"\necho \"Template  : ${REPO_OWNER}/springboot-cicd-template\"\
-        \necho \"Commit SHA: $COMMIT_SHA\"\n\n# Wait for GitHub to index the workflow\
-        \ file after the sync push\necho \"Waiting 15s for GitHub Actions to index\
-        \ the workflow file...\"\nsleep 15\n\n# gh api exits 0 on HTTP 204 (workflow_dispatch\
-        \ success), non-zero on error.\n# Do NOT use -w or --silent with -o \u2014\
-        \ just let gh report errors naturally.\ngh api \\\n  --method POST \\\n  -H\
-        \ \"Accept: application/vnd.github+json\" \\\n  \"/repos/${REPO_OWNER}/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/dispatches\"\
-        \ \\\n  -f ref=main \\\n  -f \"inputs[app_repo]=${APP_REPO}\" \\\n  -f \"\
-        inputs[app_ref]=${COMMIT_SHA}\" \\\n  -f \"inputs[java_version]=17\" \\\n\
-        \  -f \"inputs[image_name]=${REPO_OWNER}/springboot-api\" \\\n  -f \"inputs[aws_region]=us-east-1\"\
-        \ \\\n  -f \"inputs[instance_type]=t3.small\" \\\n  -f \"inputs[health_endpoint]=/actuator/health\"\
-        \ \\\n  -f \"inputs[run_perf_tests]=true\" \\\n  -f \"inputs[owasp_cvss_threshold]=9\"\
-        \n\necho \"Enterprise pipeline dispatched successfully.\"\necho \"dispatch_time=$(date\
-        \ -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$GITHUB_OUTPUT\"\n"
-      env:
-        GH_TOKEN: ${{ secrets.CICD_TEMPLATE_TOKEN }}
-        APP_REPO: ${{ github.repository }}
-        COMMIT_SHA: ${{ github.sha }}
-        REPO_OWNER: ${{ github.repository_owner }}
-    - name: Poll enterprise pipeline to completion
-      run: "set -euo pipefail\necho \"Waiting 60s for dispatched run to appear in\
-        \ GitHub Actions...\"\nsleep 60\n\nMAX_WAIT=5400\nWAITED=0\nINTERVAL=30\n\n\
-        while [ \"$WAITED\" -lt \"$MAX_WAIT\" ]; do\n  RUN_JSON=$(gh api \\\n    -H\
-        \ \"Accept: application/vnd.github+json\" \\\n    \"/repos/${REPO_OWNER}/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/runs?per_page=1\"\
-        \ \\\n    2>/dev/null || echo '{\"workflow_runs\":[]}')\n\n  STATUS=$(echo\
-        \ \"$RUN_JSON\" | python3 -c \\\n    \"import sys,json; r=json.load(sys.stdin)['workflow_runs'];\
-        \ print(r[0]['status'] if r else 'none')\" 2>/dev/null || echo \"none\")\n\
-        \  CONCLUSION=$(echo \"$RUN_JSON\" | python3 -c \\\n    \"import sys,json;\
-        \ r=json.load(sys.stdin)['workflow_runs']; print(r[0]['conclusion'] or 'pending'\
-        \ if r else 'none')\" 2>/dev/null || echo \"none\")\n  RUN_URL=$(echo \"$RUN_JSON\"\
-        \ | python3 -c \\\n    \"import sys,json; r=json.load(sys.stdin)['workflow_runs'];\
-        \ print(r[0]['html_url'] if r else '')\" 2>/dev/null || echo \"\")\n\n  echo\
-        \ \"[${WAITED}s] status=${STATUS} conclusion=${CONCLUSION} url=${RUN_URL}\"\
-        \n\n  if [ \"$STATUS\" = \"completed\" ]; then\n    if [ \"$CONCLUSION\" =\
-        \ \"success\" ]; then\n      echo \"Enterprise pipeline SUCCEEDED: $RUN_URL\"\
-        \n      exit 0\n    else\n      echo \"::error::Enterprise pipeline FAILED\
-        \ (conclusion=${CONCLUSION}): $RUN_URL\"\n      exit 1\n    fi\n  fi\n\n \
-        \ sleep \"$INTERVAL\"\n  WAITED=$((WAITED + INTERVAL))\ndone\n\necho \"::error::Timeout:\
-        \ enterprise pipeline did not complete within ${MAX_WAIT}s\"\nexit 1\n"
-      env:
-        GH_TOKEN: ${{ secrets.CICD_TEMPLATE_TOKEN }}
-        REPO_OWNER: ${{ github.repository_owner }}
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+    - name: Terraform Init
+      run: "terraform init -input=false -reconfigure \\\n  -backend-config=\"bucket=${{\
+        \ secrets.TF_STATE_BUCKET }}\" \\\n  -backend-config=\"key=${{ secrets.PROJECT_NAME\
+        \ }}/terraform.tfstate\" \\\n  -backend-config=\"region=us-east-1\"\n"
+      working-directory: infra
+    - name: Terraform Apply
+      run: terraform apply -input=false -auto-approve
+      working-directory: infra
   configure:
     runs-on: ubuntu-latest
     needs:
     - provision
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
     - uses: actions/checkout@v4
-    - name: "Configure complete \u2014 handled by enterprise-pipeline.yml"
-      run: 'echo "All configuration (Docker, nginx, app container) was performed"
+    - name: Install Ansible
+      run: pip install ansible-core
+    - name: Write SSH key
+      run: 'mkdir -p ~/.ssh
 
-        echo "by ansible-configure stage inside springboot-cicd-template."
+        printf ''%s\n'' "$SSH_KEY" > ~/.ssh/deploy_key
 
-        echo "This stage satisfies the platform provision -> configure -> verify backbone."
+        chmod 600 ~/.ssh/deploy_key
 
         '
+      env:
+        SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+    - id: get_ip
+      name: Get instance IP
+      run: "terraform init -input=false -reconfigure \\\n  -backend-config=\"bucket=${{\
+        \ secrets.TF_STATE_BUCKET }}\" \\\n  -backend-config=\"key=${{ secrets.PROJECT_NAME\
+        \ }}/terraform.tfstate\" \\\n  -backend-config=\"region=us-east-1\"\necho\
+        \ \"instance_ip=$(terraform output -raw instance_ip)\" >> \"$GITHUB_OUTPUT\"\
+        \n"
+      working-directory: infra
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+    - name: Scan host keys
+      run: ssh-keyscan -H "${{ steps.get_ip.outputs.instance_ip }}" >> ~/.ssh/known_hosts
+    - name: Generate Ansible inventory
+      run: 'cat > ansible/inventory.ini <<EOF
+
+        [app]
+
+        ${{ steps.get_ip.outputs.instance_ip }} ansible_user=${{ secrets.SSH_USER
+        }} ansible_ssh_private_key_file=~/.ssh/deploy_key
+
+        EOF
+
+        '
+    - name: Run Ansible playbook
+      run: "ansible-playbook -i ansible/inventory.ini ansible/site.yml \\\n  -e \"\
+        image_tag=$IMAGE_TAG\" \\\n  -e \"github_actor=${{ github.actor }}\" \\\n\
+        \  -e \"github_token=${{ github.token }}\" \\\n  -e \"project_name=${{ secrets.PROJECT_NAME\
+        \ }}\"\n"
+      env:
+        IMAGE_TAG: ${{ github.sha }}
   verify:
     runs-on: ubuntu-latest
     needs:
     - configure
-    - provision
     timeout-minutes: 10
     steps:
     - uses: actions/checkout@v4
@@ -111,24 +94,18 @@ jobs:
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_wrapper: false
-    - name: Terraform init (read state)
+    - id: get_ip
+      name: Get instance IP
       run: "terraform init -input=false -reconfigure \\\n  -backend-config=\"bucket=${{\
         \ secrets.TF_STATE_BUCKET }}\" \\\n  -backend-config=\"key=${{ secrets.PROJECT_NAME\
-        \ }}/terraform.tfstate\" \\\n  -backend-config=\"region=us-east-1\"\n"
+        \ }}/terraform.tfstate\" \\\n  -backend-config=\"region=us-east-1\"\necho\
+        \ \"instance_ip=$(terraform output -raw instance_ip)\" >> \"$GITHUB_OUTPUT\"\
+        \n"
       working-directory: infra
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         AWS_REGION: us-east-1
-    - id: get_ip
-      name: Get instance IP from terraform output
-      run: echo "instance_ip=$(terraform output -raw instance_ip)" >> "$GITHUB_OUTPUT"
-      working-directory: infra
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        AWS_REGION: us-east-1
-    - name: Final health check with retries
-      run: "echo \"Confirming app health after full enterprise pipeline run...\"\n\
-        curl --fail --retry 12 --retry-delay 15 --retry-all-errors \\\n  http://${{\
+    - name: Health check with retries
+      run: "curl --fail --retry 12 --retry-delay 15 --retry-all-errors \\\n  http://${{\
         \ steps.get_ip.outputs.instance_ip }}/actuator/health\n"
