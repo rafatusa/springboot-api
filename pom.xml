@@ -24,6 +24,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <!-- Plugin versions -->
     <checkstyle-plugin.version>3.3.1</checkstyle-plugin.version>
+    <checkstyle.version>10.14.2</checkstyle.version>
     <spotbugs-plugin.version>4.8.3.1</spotbugs-plugin.version>
     <owasp-plugin.version>9.2.0</owasp-plugin.version>
     <surefire.version>3.2.5</surefire.version>
@@ -141,11 +142,18 @@
         </executions>
       </plugin>
 
-      <!-- Checkstyle -->
+      <!-- Checkstyle — explicitly pin engine to 10.14.2 to avoid bundled 9.3 -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-checkstyle-plugin</artifactId>
         <version>${checkstyle-plugin.version}</version>
+        <dependencies>
+          <dependency>
+            <groupId>com.puppycrawl.tools</groupId>
+            <artifactId>checkstyle</artifactId>
+            <version>${checkstyle.version}</version>
+          </dependency>
+        </dependencies>
         <configuration>
           <configLocation>checkstyle.xml</configLocation>
           <failsOnError>true</failsOnError>

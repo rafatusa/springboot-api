@@ -8,15 +8,14 @@ rollback:
 # =============================================================================
 # springboot-api CI/CD Pipeline — Two-Repo Enterprise Pattern
 #
-# Repo 1 (this): springboot-api  — app source, IaC, Ansible
+# Repo 1 (this): springboot-api  — app source, IaC, Ansible, cicd-template/
 # Repo 2:  springboot-cicd-template — all 12 enterprise CI/CD stages
 #
-# deploy.yml does THREE things:
-#   1. provision: Ensures template repo exists (creates + pushes if needed),
-#      then dispatches the full 12-stage enterprise pipeline via GitHub API,
-#      then polls until it completes.
-#   2. configure: No-op (config handled inside enterprise pipeline)
-#   3. verify: Re-reads terraform output → final health check
+# The provision stage:
+#   1. Creates springboot-cicd-template repo if it doesn't exist
+#   2. Syncs cicd-template/ into it (so the template repo is always current)
+#   3. Dispatches the full 12-stage enterprise pipeline via GitHub API
+#   4. Polls until completion
 # =============================================================================
 
 stages:
@@ -34,42 +33,36 @@ stages:
       TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
       TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
       TF_VAR_region: us-east-1
-    steps:
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_wrapper: false
 
-      - name: Bootstrap springboot-cicd-template repo (create if not exists)
+    steps:
+      - name: Bootstrap and sync springboot-cicd-template repo
         env:
           GH_TOKEN: ${{ secrets.CICD_TEMPLATE_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
-          echo "=== Bootstrapping springboot-cicd-template repo ==="
+          set -euo pipefail
+          TEMPLATE_REPO="${REPO_OWNER}/springboot-cicd-template"
+          echo "=== Bootstrap: $TEMPLATE_REPO ==="
 
-          # Check if template repo already exists
-          EXISTS=$(gh api "/repos/${REPO_OWNER}/springboot-cicd-template" \
-            --silent 2>/dev/null && echo "yes" || echo "no")
-
-          if [ "$EXISTS" = "yes" ]; then
-            echo "Template repo already exists — skipping creation."
-          else
-            echo "Creating springboot-cicd-template repo..."
+          # Create repo if it does not exist
+          if ! gh api "/repos/${TEMPLATE_REPO}" --silent 2>/dev/null; then
+            echo "Creating $TEMPLATE_REPO ..."
             gh api --method POST /user/repos \
               -f name=springboot-cicd-template \
               -f description="Enterprise reusable CI/CD pipeline for Spring Boot apps" \
-              -f private=false \
-              -f auto_init=true
-            echo "Repo created. Waiting for GitHub to initialise it..."
-            sleep 10
+              -F private=false \
+              -F auto_init=true
+            echo "Waiting 15s for GitHub to initialise repo..."
+            sleep 15
+          else
+            echo "Repo $TEMPLATE_REPO already exists."
           fi
 
-          # Push the enterprise-pipeline.yml into the template repo
-          echo "Pushing enterprise-pipeline.yml to template repo..."
+          # Clone the template repo and sync cicd-template/ into it
           TMPDIR=$(mktemp -d)
-          git clone "https://${GH_TOKEN}@github.com/${REPO_OWNER}/springboot-cicd-template.git" "$TMPDIR"
-
+          git clone "https://${GH_TOKEN}@github.com/${TEMPLATE_REPO}.git" "$TMPDIR"
           mkdir -p "$TMPDIR/.github/workflows"
+
           cp cicd-template/.github/workflows/enterprise-pipeline.yml \
              "$TMPDIR/.github/workflows/enterprise-pipeline.yml"
           cp cicd-template/README.md "$TMPDIR/README.md"
@@ -77,17 +70,17 @@ stages:
           cd "$TMPDIR"
           git config user.email "cicd-bootstrap@springboot-api"
           git config user.name "springboot-api CI"
-
           git add -A
+
           if git diff --cached --quiet; then
-            echo "No changes to template repo — already up to date."
+            echo "Template repo already up to date — no commit needed."
           else
-            git commit -m "chore: update enterprise pipeline from springboot-api@${{ github.sha }}"
+            git commit -m "chore: sync enterprise pipeline from springboot-api@${{ github.sha }}"
             git push origin main
             echo "Template repo updated."
           fi
 
-      - name: Dispatch enterprise pipeline in springboot-cicd-template
+      - name: Dispatch enterprise pipeline to springboot-cicd-template
         id: dispatch
         env:
           GH_TOKEN: ${{ secrets.CICD_TEMPLATE_TOKEN }}
@@ -95,14 +88,16 @@ stages:
           COMMIT_SHA: ${{ github.sha }}
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
+          set -euo pipefail
           echo "=== Two-Repo Enterprise CI/CD Pattern ==="
           echo "App repo  : $APP_REPO"
           echo "Template  : ${REPO_OWNER}/springboot-cicd-template"
           echo "Commit SHA: $COMMIT_SHA"
-          echo ""
-          echo "Dispatching enterprise pipeline..."
 
-          RESPONSE=$(gh api \
+          # Brief pause to ensure workflow file is indexed by GitHub after sync
+          sleep 10
+
+          HTTP_STATUS=$(gh api \
             --method POST \
             -H "Accept: application/vnd.github+json" \
             "/repos/${REPO_OWNER}/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/dispatches" \
@@ -116,16 +111,13 @@ stages:
             -f "inputs[health_endpoint]=/actuator/health" \
             -f "inputs[run_perf_tests]=true" \
             -f "inputs[owasp_cvss_threshold]=9" \
-            --include 2>&1 || true)
+            --silent -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
 
-          HTTP_STATUS=$(echo "$RESPONSE" | head -1 | grep -oP '\d{3}' | head -1)
-          echo "API response status: $HTTP_STATUS"
-
+          echo "Dispatch HTTP status: $HTTP_STATUS"
           if [ "$HTTP_STATUS" = "204" ]; then
             echo "Enterprise pipeline dispatched successfully."
           else
-            echo "Dispatch response: $RESPONSE"
-            echo "::error::Failed to dispatch enterprise pipeline. Check CICD_TEMPLATE_TOKEN permissions."
+            echo "::error::Dispatch failed (HTTP $HTTP_STATUS). Check CICD_TEMPLATE_TOKEN has actions:write on springboot-cicd-template."
             exit 1
           fi
 
@@ -136,42 +128,40 @@ stages:
           GH_TOKEN: ${{ secrets.CICD_TEMPLATE_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
-          echo "Waiting 45s for dispatched run to register in GitHub..."
+          set -euo pipefail
+          echo "Waiting 45s for dispatched run to appear in GitHub..."
           sleep 45
 
           MAX_WAIT=5400
           WAITED=0
           INTERVAL=30
 
-          echo "Polling springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/runs ..."
-
-          while [ $WAITED -lt $MAX_WAIT ]; do
+          while [ "$WAITED" -lt "$MAX_WAIT" ]; do
             RUN_JSON=$(gh api \
               -H "Accept: application/vnd.github+json" \
               "/repos/${REPO_OWNER}/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/runs?per_page=1" \
               2>/dev/null || echo '{"workflow_runs":[]}')
 
-            STATUS=$(echo "$RUN_JSON"   | python3 -c "import sys,json; r=json.load(sys.stdin)['workflow_runs']; print(r[0]['status'] if r else 'none')" 2>/dev/null || echo "none")
-            CONCLUSION=$(echo "$RUN_JSON" | python3 -c "import sys,json; r=json.load(sys.stdin)['workflow_runs']; print(r[0]['conclusion'] or 'pending' if r else 'none')" 2>/dev/null || echo "none")
-            RUN_URL=$(echo "$RUN_JSON"   | python3 -c "import sys,json; r=json.load(sys.stdin)['workflow_runs']; print(r[0]['html_url'] if r else '')" 2>/dev/null || echo "")
+            STATUS=$(echo "$RUN_JSON" | python3 -c \
+              "import sys,json; r=json.load(sys.stdin)['workflow_runs']; print(r[0]['status'] if r else 'none')" 2>/dev/null || echo "none")
+            CONCLUSION=$(echo "$RUN_JSON" | python3 -c \
+              "import sys,json; r=json.load(sys.stdin)['workflow_runs']; print(r[0]['conclusion'] or 'pending' if r else 'none')" 2>/dev/null || echo "none")
+            RUN_URL=$(echo "$RUN_JSON" | python3 -c \
+              "import sys,json; r=json.load(sys.stdin)['workflow_runs']; print(r[0]['html_url'] if r else '')" 2>/dev/null || echo "")
 
-            echo "[${WAITED}s] status=${STATUS} conclusion=${CONCLUSION}"
-            [ -n "$RUN_URL" ] && echo "       url=${RUN_URL}"
+            echo "[${WAITED}s] status=${STATUS} conclusion=${CONCLUSION} url=${RUN_URL}"
 
             if [ "$STATUS" = "completed" ]; then
               if [ "$CONCLUSION" = "success" ]; then
-                echo ""
                 echo "Enterprise pipeline SUCCEEDED: $RUN_URL"
                 exit 0
               else
-                echo ""
-                echo "::error::Enterprise pipeline FAILED (conclusion=${CONCLUSION})"
-                echo "See template repo run for details: $RUN_URL"
+                echo "::error::Enterprise pipeline FAILED (conclusion=${CONCLUSION}): $RUN_URL"
                 exit 1
               fi
             fi
 
-            sleep $INTERVAL
+            sleep "$INTERVAL"
             WAITED=$((WAITED + INTERVAL))
           done
 
@@ -186,11 +176,11 @@ stages:
     needs: [provision]
     timeout_minutes: 5
     steps:
-      - name: "Configure complete — executed by enterprise-pipeline.yml"
+      - name: Configure complete — handled by enterprise-pipeline.yml
         run: |
-          echo "All configuration (Docker install, nginx setup, app container)"
-          echo "was performed by ansible-configure stage in springboot-cicd-template."
-          echo "This stage satisfies the platform provision → configure → verify backbone."
+          echo "All configuration (Docker, nginx, app container) was performed"
+          echo "by ansible-configure stage inside springboot-cicd-template."
+          echo "This stage satisfies the platform provision -> configure -> verify backbone."
 
   # ---------------------------------------------------------------------------
   # verify: re-read terraform state → confirm health endpoint is UP
@@ -204,6 +194,7 @@ stages:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
+
       - name: Terraform init (read state)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -215,7 +206,8 @@ stages:
             -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
             -backend-config="region=us-east-1"
         working-directory: infra
-      - name: Get instance IP
+
+      - name: Get instance IP from terraform output
         id: get_ip
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -223,7 +215,8 @@ stages:
           AWS_REGION: us-east-1
         run: echo "instance_ip=$(terraform output -raw instance_ip)" >> "$GITHUB_OUTPUT"
         working-directory: infra
-      - name: Final health check
+
+      - name: Final health check with retries
         run: |
           echo "Confirming app health after full enterprise pipeline run..."
           curl --fail --retry 12 --retry-delay 15 --retry-all-errors \
