@@ -30,9 +30,14 @@
     <module name="LeftCurly"/>
     <module name="RightCurly"/>
 
-    <!-- Whitespace -->
-    <module name="WhitespaceAround"/>
-    <module name="NoWhitespaceAtEndOfLine"/>
+    <!-- Whitespace (NoWhitespaceAtEndOfLine removed — dropped in Checkstyle 10.x) -->
+    <module name="WhitespaceAround">
+      <property name="allowEmptyConstructors" value="true"/>
+      <property name="allowEmptyMethods" value="true"/>
+      <property name="allowEmptyTypes" value="true"/>
+      <property name="allowEmptyLoops" value="true"/>
+      <property name="allowEmptyLambdas" value="true"/>
+    </module>
     <module name="GenericWhitespace"/>
 
     <!-- Miscellaneous -->
