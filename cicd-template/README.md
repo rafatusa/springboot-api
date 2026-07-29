@@ -1,105 +1,145 @@
 # springboot-cicd-template
 
-> **Enterprise GitHub Actions Reusable Workflow Library** for Spring Boot REST APIs on AWS EC2.
+> **Enterprise reusable CI/CD pipeline for Spring Boot applications.**  
+> This is the **template repository** in a two-repo CI/CD architecture.  
+> The companion app repo (`springboot-api`) triggers this pipeline; all 12 stages run here.
 
-## Overview
+---
 
-This repository is a **GitHub Actions reusable workflow template** that provides a complete, 12-stage enterprise CI/CD pipeline. Application repositories call this workflow via [`workflow_call`](https://docs.github.com/en/actions/using-workflows/reusing-workflows) and inherit the full pipeline without duplicating CI/CD logic.
+## Two-Repo Architecture
 
-## Pipeline Stages
+```
+┌─────────────────────────────┐        ┌──────────────────────────────────────────┐
+│   springboot-api (app repo) │        │  springboot-cicd-template (this repo)    │
+│                             │        │                                          │
+│  Source code, IaC, Ansible  │        │  enterprise-pipeline.yml                 │
+│                             │  calls │                                          │
+│  deploy.yml ──────────────────────►  │  Stage 1:  Code Quality                 │
+│  (gh api workflow dispatch) │        │  Stage 2:  Unit Tests                    │
+│                             │        │  Stage 3:  Integration Tests             │
+└─────────────────────────────┘        │  Stage 4:  Security Scan (OWASP)         │
+                                       │  Stage 5:  Build JAR                     │
+                                       │  Stage 6:  Docker Build & Push (GHCR)    │
+                                       │  Stage 7:  Terraform Provision (EC2)     │
+                                       │  Stage 8:  Ansible Configure             │
+                                       │  Stage 9:  Deployment Verification       │
+                                       │  Stage 10: Smoke Tests                   │
+                                       │  Stage 11: Performance Tests (k6)        │
+                                       │  Stage 12: Notify + Auto-Rollback        │
+                                       └──────────────────────────────────────────┘
+```
 
-| Stage | Kind | What it does |
-|-------|------|-------------|
-| 1 | **Code Quality** | Checkstyle (Google style, 120 char limit) + SpotBugs static analysis |
-| 2 | **Unit Tests** | JUnit 5 + Mockito via Maven Surefire; JaCoCo coverage report |
-| 3 | **Integration Tests** | `@SpringBootTest` via Maven Failsafe |
-| 4 | **Security Scan** | OWASP Dependency Check; fails on CVSS ≥ 9 (configurable) |
-| 5 | **Build JAR** | Maven package `-DskipTests`; uploads artifact |
-| 6 | **Docker Build & Push** | Multi-stage Dockerfile → GHCR (tagged with commit SHA + `latest`) |
-| 7 | **Terraform Provision** | EC2 t3.small + EIP + SG via Terraform on AWS |
-| 8 | **Ansible Configure** | Docker install, GHCR pull, nginx reverse proxy, systemd |
-| 9 | **Deployment Verification** | Health check with 15 retries / 20s delay |
-| 10 | **Smoke Tests** | curl-based endpoint assertions (health, info, items API) |
-| 11 | **Performance Tests** | k6 load test: 50 VUs, p95 < 500ms threshold |
-| 12 | **Notify + Rollback** | Job summary; automatic rollback to previous SHA on failure |
+The template pipeline **checks out the app repo** at the dispatched SHA, runs all quality gates, builds and pushes the Docker image, provisions EC2 with Terraform, configures it with Ansible, and verifies the live deployment.
 
-## Usage
+---
 
-In your application repository, create `.github/workflows/deploy.yml`:
+## How to Use This Template
+
+### Method 1: workflow_call (GitHub-native reusable workflow)
+
+Add this to your app repo's `.github/workflows/deploy.yml`:
 
 ```yaml
 name: Deploy
-
 on:
   push:
     branches: [main]
+  workflow_dispatch: {}
 
 jobs:
-  pipeline:
+  enterprise-pipeline:
     uses: YOUR_ORG/springboot-cicd-template/.github/workflows/enterprise-pipeline.yml@main
     with:
-      image_name: "YOUR_ORG/your-app-name"
       java_version: "17"
+      image_name: "YOUR_ORG/YOUR_APP"
       aws_region: "us-east-1"
+      instance_type: "t3.small"
+      health_endpoint: "/actuator/health"
       run_perf_tests: true
-    secrets:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
-      PROJECT_NAME: ${{ secrets.PROJECT_NAME }}
-      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-      SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
-      SSH_USER: ${{ secrets.SSH_USER }}
+      owasp_cvss_threshold: "9"
+    secrets: inherit
 ```
 
-## Inputs Reference
+### Method 2: workflow_dispatch via GitHub API (used by springboot-api)
 
-| Input | Type | Default | Description |
-|-------|------|---------|-------------|
-| `java_version` | string | `"17"` | Java version for build |
-| `maven_args` | string | `"--no-transfer-progress"` | Extra Maven flags |
-| `image_name` | string | **required** | Docker image path (e.g. `my-org/my-app`) |
-| `aws_region` | string | `"us-east-1"` | AWS deployment region |
-| `instance_type` | string | `"t3.small"` | EC2 instance type |
-| `health_endpoint` | string | `"/actuator/health"` | Health check path |
-| `run_perf_tests` | boolean | `true` | Enable/disable k6 tests |
-| `owasp_cvss_threshold` | string | `"9"` | CVSS score to fail the build |
+```bash
+gh api \
+  --method POST \
+  -H "Accept: application/vnd.github+json" \
+  "/repos/YOUR_ORG/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/dispatches" \
+  -f ref=main \
+  -f "inputs[app_repo]=YOUR_ORG/YOUR_APP" \
+  -f "inputs[app_ref]=<commit-sha>" \
+  -f "inputs[image_name]=YOUR_ORG/YOUR_APP" \
+  -f "inputs[aws_region]=us-east-1" \
+  -f "inputs[instance_type]=t3.small" \
+  -f "inputs[health_endpoint]=/actuator/health" \
+  -f "inputs[run_perf_tests]=true" \
+  -f "inputs[owasp_cvss_threshold]=9"
+```
+
+---
+
+## Pipeline Stages
+
+| # | Stage | Tool | Gate |
+|---|-------|------|------|
+| 1 | Code Quality | Checkstyle + SpotBugs | Blocks on violations |
+| 2 | Unit Tests | Maven Surefire + JaCoCo | Blocks on failure |
+| 3 | Integration Tests | Maven Failsafe | Blocks on failure |
+| 4 | Security Scan | OWASP Dependency Check | Blocks on CVSS ≥ threshold |
+| 5 | Build JAR | Maven package | Blocks on compile error |
+| 6 | Docker Build & Push | Docker Buildx → GHCR | Blocks on build error |
+| 7 | Terraform Provision | Terraform (AWS EC2) | Blocks on plan/apply error |
+| 8 | Ansible Configure | Ansible (Docker + nginx) | Blocks on task failure |
+| 9 | Deployment Verify | curl health check | Blocks if app not UP |
+| 10 | Smoke Tests | curl API assertions | Blocks on endpoint failure |
+| 11 | Performance Tests | k6 (50 VUs, 180s) | Blocks on p95 > 500ms |
+| 12 | Notify + Rollback | GitHub Step Summary | Auto-rollback on failure |
+
+---
 
 ## Required Secrets
+
+These secrets must be available in the calling repository (passed via `secrets: inherit` or explicitly):
 
 | Secret | Description |
 |--------|-------------|
 | `AWS_ACCESS_KEY_ID` | AWS IAM access key |
 | `AWS_SECRET_ACCESS_KEY` | AWS IAM secret key |
 | `TF_STATE_BUCKET` | S3 bucket for Terraform state |
-| `PROJECT_NAME` | Unique project identifier |
-| `SSH_PRIVATE_KEY` | EC2 SSH private key (PEM) |
+| `PROJECT_NAME` | Platform project name (used as TF resource prefix) |
+| `SSH_PRIVATE_KEY` | EC2 SSH private key (RSA PEM) |
 | `SSH_PUBLIC_KEY` | EC2 SSH public key |
-| `SSH_USER` | SSH username (e.g. `ubuntu`) |
+| `SSH_USER` | EC2 SSH user (e.g. `ubuntu`) |
 
-## Repository Requirements
+---
 
-The consuming application repository must contain:
+## Inputs Reference
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `app_repo` | string | `""` | Source repo to check out (`owner/repo`) |
+| `app_ref` | string | `""` | Git SHA or branch to deploy |
+| `java_version` | string | `"17"` | Java version for build |
+| `maven_args` | string | `"--no-transfer-progress"` | Extra Maven arguments |
+| `image_name` | string | **required** | Docker image name (`owner/app`) |
+| `aws_region` | string | `"us-east-1"` | AWS region |
+| `instance_type` | string | `"t3.small"` | EC2 instance type |
+| `health_endpoint` | string | `"/actuator/health"` | App health check path |
+| `run_perf_tests` | boolean | `true` | Toggle k6 performance stage |
+| `owasp_cvss_threshold` | string | `"9"` | OWASP fail-build CVSS threshold |
+
+---
+
+## Repository Structure
 
 ```
-infra/              # Terraform files (main.tf, variables.tf, outputs.tf, versions.tf)
-ansible/            # Ansible playbook (site.yml + roles/)
-  roles/
-    common/
-    app/
-    nginx_proxy/
-tests/
-  performance/
-    load-test.js    # k6 script
-Dockerfile          # Multi-stage build
-checkstyle.xml      # Checkstyle rules
-pom.xml             # Maven build with checkstyle + spotbugs + OWASP plugins
+springboot-cicd-template/
+└── .github/
+    └── workflows/
+        └── enterprise-pipeline.yml   ← The reusable workflow (all 12 stages)
+README.md                             ← This file
 ```
 
-## Rollback Behavior
-
-If any stage after `terraform-provision` fails, the `rollback` job automatically triggers and re-deploys the Docker image from the **previous commit SHA** (`HEAD~1`). This ensures the live environment is never left in a broken state.
-
-## License
-
-MIT
+The template repository is intentionally minimal — it contains only the reusable workflow definition. Application code, IaC, Ansible playbooks, and tests live in the app repository and are checked out by this pipeline at the specified `app_ref`.

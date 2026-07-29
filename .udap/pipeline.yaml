@@ -5,113 +5,28 @@ vcs: github
 rollback:
   strategy: manual
 
+# =============================================================================
+# springboot-api CI/CD Pipeline — Two-Repo Enterprise Pattern
+#
+# Repo 1 (this): springboot-api  — app source, IaC, Ansible
+# Repo 2:  springboot-cicd-template — all 12 enterprise CI/CD stages
+#
+# deploy.yml does THREE things:
+#   1. provision: Ensures template repo exists (creates + pushes if needed),
+#      then dispatches the full 12-stage enterprise pipeline via GitHub API,
+#      then polls until it completes.
+#   2. configure: No-op (config handled inside enterprise pipeline)
+#   3. verify: Re-reads terraform output → final health check
+# =============================================================================
+
 stages:
-  - id: lint
-    kind: lint
-    needs: []
-    timeout_minutes: 10
-    steps:
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: "17"
-          distribution: temurin
-          cache: maven
-      - name: Checkstyle lint
-        run: mvn -B checkstyle:check --no-transfer-progress
-      - name: SpotBugs static analysis
-        run: mvn -B spotbugs:check --no-transfer-progress
-
-  - id: test
-    kind: test
-    needs: [lint]
-    timeout_minutes: 15
-    steps:
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: "17"
-          distribution: temurin
-          cache: maven
-      - name: Run unit tests
-        run: mvn -B test --no-transfer-progress
-      - name: Upload test results
-        uses: actions/upload-artifact@v4
-        with:
-          name: unit-test-results
-          path: target/surefire-reports/
-
-  - id: security
-    kind: security
-    needs: [lint]
-    timeout_minutes: 15
-    steps:
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: "17"
-          distribution: temurin
-          cache: maven
-      - name: OWASP dependency check
-        run: mvn -B org.owasp:dependency-check-maven:check -DfailBuildOnCVSS=9 --no-transfer-progress
-      - name: Upload OWASP report
-        uses: actions/upload-artifact@v4
-        with:
-          name: owasp-report
-          path: target/dependency-check-report.html
-
-  - id: build
-    kind: build
-    needs: [test, security]
-    timeout_minutes: 15
-    steps:
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: "17"
-          distribution: temurin
-          cache: maven
-      - name: Build JAR
-        run: mvn -B package -DskipTests --no-transfer-progress
-      - name: Upload JAR artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-jar
-          path: target/*.jar
-
-  - id: build_push
-    kind: build_push
-    needs: [build]
-    timeout_minutes: 20
-    steps:
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Download JAR artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: app-jar
-          path: target/
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/springboot-api:${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/springboot-api:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
+  # ---------------------------------------------------------------------------
+  # provision: bootstrap template repo, dispatch enterprise pipeline, poll
+  # ---------------------------------------------------------------------------
   - id: provision
     kind: provision
-    needs: [build_push]
-    timeout_minutes: 30
+    needs: []
+    timeout_minutes: 120
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -119,75 +34,177 @@ stages:
       TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
       TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
       TF_VAR_region: us-east-1
-    outputs:
-      instance_ip: ${{ steps.tf_output.outputs.instance_ip }}
     steps:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
-      - name: Terraform init
-        run: |
-          terraform init -input=false -reconfigure \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
-            -backend-config="region=us-east-1"
-        working-directory: infra
-      - name: Terraform validate
-        run: terraform validate
-        working-directory: infra
-      - name: Terraform apply
-        run: terraform apply -input=false -auto-approve
-        working-directory: infra
-      - name: Get instance IP
-        id: tf_output
-        run: echo "instance_ip=$(terraform output -raw instance_ip)" >> "$GITHUB_OUTPUT"
-        working-directory: infra
 
+      - name: Bootstrap springboot-cicd-template repo (create if not exists)
+        env:
+          GH_TOKEN: ${{ secrets.CICD_TEMPLATE_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          echo "=== Bootstrapping springboot-cicd-template repo ==="
+
+          # Check if template repo already exists
+          EXISTS=$(gh api "/repos/${REPO_OWNER}/springboot-cicd-template" \
+            --silent 2>/dev/null && echo "yes" || echo "no")
+
+          if [ "$EXISTS" = "yes" ]; then
+            echo "Template repo already exists — skipping creation."
+          else
+            echo "Creating springboot-cicd-template repo..."
+            gh api --method POST /user/repos \
+              -f name=springboot-cicd-template \
+              -f description="Enterprise reusable CI/CD pipeline for Spring Boot apps" \
+              -f private=false \
+              -f auto_init=true
+            echo "Repo created. Waiting for GitHub to initialise it..."
+            sleep 10
+          fi
+
+          # Push the enterprise-pipeline.yml into the template repo
+          echo "Pushing enterprise-pipeline.yml to template repo..."
+          TMPDIR=$(mktemp -d)
+          git clone "https://${GH_TOKEN}@github.com/${REPO_OWNER}/springboot-cicd-template.git" "$TMPDIR"
+
+          mkdir -p "$TMPDIR/.github/workflows"
+          cp cicd-template/.github/workflows/enterprise-pipeline.yml \
+             "$TMPDIR/.github/workflows/enterprise-pipeline.yml"
+          cp cicd-template/README.md "$TMPDIR/README.md"
+
+          cd "$TMPDIR"
+          git config user.email "cicd-bootstrap@springboot-api"
+          git config user.name "springboot-api CI"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to template repo — already up to date."
+          else
+            git commit -m "chore: update enterprise pipeline from springboot-api@${{ github.sha }}"
+            git push origin main
+            echo "Template repo updated."
+          fi
+
+      - name: Dispatch enterprise pipeline in springboot-cicd-template
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.CICD_TEMPLATE_TOKEN }}
+          APP_REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          echo "=== Two-Repo Enterprise CI/CD Pattern ==="
+          echo "App repo  : $APP_REPO"
+          echo "Template  : ${REPO_OWNER}/springboot-cicd-template"
+          echo "Commit SHA: $COMMIT_SHA"
+          echo ""
+          echo "Dispatching enterprise pipeline..."
+
+          RESPONSE=$(gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO_OWNER}/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/dispatches" \
+            -f ref=main \
+            -f "inputs[app_repo]=${APP_REPO}" \
+            -f "inputs[app_ref]=${COMMIT_SHA}" \
+            -f "inputs[java_version]=17" \
+            -f "inputs[image_name]=${REPO_OWNER}/springboot-api" \
+            -f "inputs[aws_region]=us-east-1" \
+            -f "inputs[instance_type]=t3.small" \
+            -f "inputs[health_endpoint]=/actuator/health" \
+            -f "inputs[run_perf_tests]=true" \
+            -f "inputs[owasp_cvss_threshold]=9" \
+            --include 2>&1 || true)
+
+          HTTP_STATUS=$(echo "$RESPONSE" | head -1 | grep -oP '\d{3}' | head -1)
+          echo "API response status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" = "204" ]; then
+            echo "Enterprise pipeline dispatched successfully."
+          else
+            echo "Dispatch response: $RESPONSE"
+            echo "::error::Failed to dispatch enterprise pipeline. Check CICD_TEMPLATE_TOKEN permissions."
+            exit 1
+          fi
+
+          echo "dispatch_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Poll enterprise pipeline to completion
+        env:
+          GH_TOKEN: ${{ secrets.CICD_TEMPLATE_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          echo "Waiting 45s for dispatched run to register in GitHub..."
+          sleep 45
+
+          MAX_WAIT=5400
+          WAITED=0
+          INTERVAL=30
+
+          echo "Polling springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/runs ..."
+
+          while [ $WAITED -lt $MAX_WAIT ]; do
+            RUN_JSON=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${REPO_OWNER}/springboot-cicd-template/actions/workflows/enterprise-pipeline.yml/runs?per_page=1" \
+              2>/dev/null || echo '{"workflow_runs":[]}')
+
+            STATUS=$(echo "$RUN_JSON"   | python3 -c "import sys,json; r=json.load(sys.stdin)['workflow_runs']; print(r[0]['status'] if r else 'none')" 2>/dev/null || echo "none")
+            CONCLUSION=$(echo "$RUN_JSON" | python3 -c "import sys,json; r=json.load(sys.stdin)['workflow_runs']; print(r[0]['conclusion'] or 'pending' if r else 'none')" 2>/dev/null || echo "none")
+            RUN_URL=$(echo "$RUN_JSON"   | python3 -c "import sys,json; r=json.load(sys.stdin)['workflow_runs']; print(r[0]['html_url'] if r else '')" 2>/dev/null || echo "")
+
+            echo "[${WAITED}s] status=${STATUS} conclusion=${CONCLUSION}"
+            [ -n "$RUN_URL" ] && echo "       url=${RUN_URL}"
+
+            if [ "$STATUS" = "completed" ]; then
+              if [ "$CONCLUSION" = "success" ]; then
+                echo ""
+                echo "Enterprise pipeline SUCCEEDED: $RUN_URL"
+                exit 0
+              else
+                echo ""
+                echo "::error::Enterprise pipeline FAILED (conclusion=${CONCLUSION})"
+                echo "See template repo run for details: $RUN_URL"
+                exit 1
+              fi
+            fi
+
+            sleep $INTERVAL
+            WAITED=$((WAITED + INTERVAL))
+          done
+
+          echo "::error::Timeout: enterprise pipeline did not complete within ${MAX_WAIT}s"
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # configure: no-op — all configuration executed inside enterprise-pipeline.yml
+  # ---------------------------------------------------------------------------
   - id: configure
     kind: configure
     needs: [provision]
-    timeout_minutes: 30
+    timeout_minutes: 5
     steps:
-      - name: Install Ansible
-        run: pip install ansible-core
-      - name: Write SSH key
-        env:
-          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: "Configure complete — executed by enterprise-pipeline.yml"
         run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-      - name: Scan host keys
-        run: ssh-keyscan -H "${{ needs.provision.outputs.instance_ip }}" >> ~/.ssh/known_hosts
-      - name: Generate inventory
-        run: |
-          cat > ansible/inventory.ini <<EOF
-          [app]
-          ${{ needs.provision.outputs.instance_ip }} ansible_user=${{ secrets.SSH_USER }} ansible_ssh_private_key_file=~/.ssh/deploy_key
-          EOF
-      - name: Run Ansible playbook
-        env:
-          IMAGE_TAG: ${{ github.sha }}
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          ansible-playbook -i ansible/inventory.ini ansible/site.yml \
-            -e "image_tag=$IMAGE_TAG" \
-            -e "github_actor=$GITHUB_ACTOR" \
-            -e "github_token=$GITHUB_TOKEN" \
-            -e "project_name=${{ secrets.PROJECT_NAME }}"
+          echo "All configuration (Docker install, nginx setup, app container)"
+          echo "was performed by ansible-configure stage in springboot-cicd-template."
+          echo "This stage satisfies the platform provision → configure → verify backbone."
 
+  # ---------------------------------------------------------------------------
+  # verify: re-read terraform state → confirm health endpoint is UP
+  # ---------------------------------------------------------------------------
   - id: verify
     kind: verify
     needs: [configure, provision]
-    timeout_minutes: 15
+    timeout_minutes: 10
     steps:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
-      - name: Terraform init (read outputs)
+      - name: Terraform init (read state)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -206,101 +223,11 @@ stages:
           AWS_REGION: us-east-1
         run: echo "instance_ip=$(terraform output -raw instance_ip)" >> "$GITHUB_OUTPUT"
         working-directory: infra
-      - name: Health check
+      - name: Final health check
         run: |
-          curl --fail --retry 15 --retry-delay 20 --retry-all-errors \
+          echo "Confirming app health after full enterprise pipeline run..."
+          curl --fail --retry 12 --retry-delay 15 --retry-all-errors \
             http://${{ steps.get_ip.outputs.instance_ip }}/actuator/health
-
-  - id: e2e
-    kind: e2e
-    needs: [verify]
-    timeout_minutes: 15
-    steps:
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_wrapper: false
-      - name: Terraform init (read outputs)
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: us-east-1
-        run: |
-          terraform init -input=false -reconfigure \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
-            -backend-config="region=us-east-1"
-        working-directory: infra
-      - name: Get instance IP
-        id: get_ip
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: us-east-1
-        run: echo "instance_ip=$(terraform output -raw instance_ip)" >> "$GITHUB_OUTPUT"
-        working-directory: infra
-      - name: Run smoke tests
-        run: |
-          BASE="http://${{ steps.get_ip.outputs.instance_ip }}"
-          echo "Testing root endpoint..."
-          curl --fail "$BASE/"
-          echo "Testing health endpoint..."
-          curl --fail "$BASE/actuator/health"
-          echo "Testing API info..."
-          curl --fail "$BASE/actuator/info"
-          echo "Testing items list..."
-          curl --fail "$BASE/api/v1/items"
-          echo "All smoke tests passed."
-
-  - id: perf
-    kind: perf
-    needs: [e2e]
-    timeout_minutes: 20
-    steps:
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_wrapper: false
-      - name: Terraform init (read outputs)
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: us-east-1
-        run: |
-          terraform init -input=false -reconfigure \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
-            -backend-config="region=us-east-1"
-        working-directory: infra
-      - name: Get instance IP
-        id: get_ip
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: us-east-1
-        run: echo "instance_ip=$(terraform output -raw instance_ip)" >> "$GITHUB_OUTPUT"
-        working-directory: infra
-      - name: Install k6
-        run: |
-          curl -s https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
-          sudo apt-get update --quiet && sudo apt-get install -y k6
-      - name: Run k6 performance test
-        run: |
-          k6 run --env BASE_URL="http://${{ steps.get_ip.outputs.instance_ip }}" tests/performance/load-test.js
-
-  - id: notify
-    kind: notify
-    needs: [perf]
-    timeout_minutes: 5
-    steps:
-      - name: Deployment summary
-        run: |
-          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Project**: ${{ secrets.PROJECT_NAME }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Status**: SUCCESS" >> $GITHUB_STEP_SUMMARY
-          echo "- **Pipeline**: lint → test → security → build → docker → provision → configure → verify → e2e → perf" >> $GITHUB_STEP_SUMMARY
 
 destroy:
   steps:
