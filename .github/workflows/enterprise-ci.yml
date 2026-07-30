@@ -11,7 +11,7 @@ jobs:
     uses: rafatusa/springboot-cicd-template/.github/workflows/enterprise-pipeline.yml@main
     with:
       app_repo: "rafatusa/springboot-api"
-      app_ref: ${ { github.sha }}
+      app_ref: "${{ github.sha }}"
       image_name: "rafatusa/springboot-api"
       java_version: "17"
       aws_region: "us-east-1"
